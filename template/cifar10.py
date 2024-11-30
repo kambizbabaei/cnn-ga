@@ -11,7 +11,7 @@ import os
 from datetime import datetime
 import multiprocessing
 from utils import StatusUpdateTool
-
+torch.device("cuda")
 class BasicBlock(nn.Module):
     expansion = 1
     def __init__(self, in_planes, planes, stride=1):
@@ -56,7 +56,7 @@ class TrainModel(object):
         #testloader = data_loader.get_test_loader(data_dir, batch_size=128, shuffle=False, num_workers=1, pin_memory=True)
         net = EvoCNNModel()
         cudnn.benchmark = True
-        net = net.cuda()
+        net.to('cuda')
         criterion = nn.CrossEntropyLoss()
         best_acc = 0.0
         self.net = net

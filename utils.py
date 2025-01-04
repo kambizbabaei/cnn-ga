@@ -8,7 +8,6 @@ import sys
 import multiprocessing
 import time
 
-
 class StatusUpdateTool(object):
     @classmethod
     def clear_config(cls):
@@ -125,17 +124,12 @@ class StatusUpdateTool(object):
     @classmethod
     def get_mutation_probs_for_each(cls):
         """
-        defined the particular probabilities for each type of mutation
-        the mutation occurs at:
-        -- number of conv/pool
-            --- 1) add one
-            --- 2) remove one
-        -- properties of conv/pool
-            --- 3) change the input channel and output channel
-            --- 4) pooling type
-
-        we will define 4 probabilities for each mutation, and then chose one based on the probability,
-        for example, if we want more connection mutations happen, a large probability should be given
+        We define 4 probabilities for each type of mutation:
+          1) add one conv/pool
+          2) remove one conv/pool
+          3) change in/out channels
+          4) pooling type
+        Then we choose one of them according to these probabilities.
         """
         rs = cls.__read_ini_file('settings', 'mutation_probs').split(',')
         assert len(rs) == 4
@@ -170,7 +164,7 @@ class Log(object):
 
     @classmethod
     def warn(cls, _str):
-        cls.__get_logger().warn(_str)
+        cls.__get_logger().warning(_str)
 
 
 class GPUTools(object):
@@ -202,7 +196,6 @@ class GPUTools(object):
         equipped_gpu_ids, gpu_info_list = cls._get_equipped_gpu_ids_and_used_gpu_info()
 
         used_gpu_ids = []
-
         for each_used_info in gpu_info_list:
             if 'python' in each_used_info:
                 used_gpu_ids.append((each_used_info.strip().split(' ', 1)[0]))
@@ -221,8 +214,8 @@ class GPUTools(object):
             Log.info('GPU_QUERY-No available GPU')
             return None
         else:
-            Log.info('GPU_QUERY-Available GPUs are: [%s], choose GPU#%s to use' % (
-            ','.join(unused_gpu_ids), unused_gpu_ids[0]))
+            Log.info('GPU_QUERY-Available GPUs are: [%s], choose GPU#%s to use'
+                     % (','.join(unused_gpu_ids), unused_gpu_ids[0]))
             return int(unused_gpu_ids[0])
 
     @classmethod
@@ -230,7 +223,6 @@ class GPUTools(object):
         _, gpu_info_list = cls._get_equipped_gpu_ids_and_used_gpu_info()
 
         used_gpu_ids = []
-
         for each_used_info in gpu_info_list:
             if 'python' in each_used_info:
                 used_gpu_ids.append((each_used_info.strip().split(' ', 1)[0]))
@@ -324,7 +316,7 @@ class Utils(object):
                     if line.startswith('Acc'):
                         indi.acc = float(line[4:])
                     elif line.startswith('[conv'):
-                        data_maps = line[6:-1].split(',', 5)
+                        data_maps = line[6:-1].split(',', 6)  # ADDED: increased split count if needed for groups
                         conv_params = {}
                         for data_item in data_maps:
                             _key, _value = data_item.split(":")
@@ -335,9 +327,19 @@ class Utils(object):
                                 conv_params['in_channel'] = int(_value)
                             elif _key == 'out':
                                 conv_params['out_channel'] = int(_value)
+                            elif _key == 'groups':  # ADDED: handle "groups" from file
+                                conv_params['groups'] = int(_value)
                             else:
                                 raise ValueError('Unknown key for load conv unit, key_name:%s' % (_key))
-                        conv = ResUnit(conv_params['number'], conv_params['in_channel'], conv_params['out_channel'])
+                        # ADDED: pass groups param to ResUnit
+                        if 'groups' not in conv_params:
+                            conv_params['groups'] = 1
+                        conv = ResUnit(
+                            conv_params['number'],
+                            conv_params['in_channel'],
+                            conv_params['out_channel'],
+                            conv_params['groups']
+                        )
                         indi.units.append(conv)
                     elif line.startswith('[pool'):
                         pool_params = {}
@@ -357,22 +359,19 @@ class Utils(object):
             pop.individuals.append(indi)
         f.close()
 
-        # load the fitness to the individuals who have been evaluated, only suitable for the first generation
+        # load the fitness to the individuals who have been evaluated (only suitable for the first generation)
         if gen_no == 0:
             after_file_path = './populations/after_%02d.txt' % (gen_no)
             if os.path.exists(after_file_path):
                 fitness_map = {}
-            f = open(after_file_path)
-            for line in f:
-                if len(line.strip()) > 0:
-                    line = line.strip().split('=')
-                    fitness_map[line[0]] = float(line[1])
-            f.close()
-
-            for indi in pop.individuals:
-                if indi.id in fitness_map:
-                    indi.acc = fitness_map[indi.id]
-
+                with open(after_file_path) as f2:
+                    for line in f2:
+                        if len(line.strip()) > 0:
+                            line = line.strip().split('=')
+                            fitness_map[line[0]] = float(line[1])
+                for indi in pop.individuals:
+                    if indi.id in fitness_map:
+                        indi.acc = fitness_map[indi.id]
         return pop
 
     @classmethod
@@ -383,55 +382,63 @@ class Utils(object):
         part3 = []
 
         f = open(_path)
-        f.readline()  # skip this comment
+        f.readline()  # skip the initial comment line
         line = f.readline().rstrip()
         while line.strip() != '#generated_init':
             part1.append(line)
             line = f.readline().rstrip()
-        # print('\n'.join(part1))
 
-        line = f.readline().rstrip()  # skip the comment '#generated_init'
+        line = f.readline().rstrip()  # skip '#generated_init'
         while line.strip() != '#generate_forward':
             part2.append(line)
             line = f.readline().rstrip()
-        # print('\n'.join(part2))
 
-        line = f.readline().rstrip()  # skip the comment '#generate_forward'
+        line = f.readline().rstrip()  # skip '#generate_forward'
         while line.strip() != '"""':
             part3.append(line)
             line = f.readline().rstrip()
-        # print('\n'.join(part3))
+
         return part1, part2, part3
 
     @classmethod
     def generate_pytorch_file(cls, indi):
-        # query convolution unit
+        # Query all conv units
         conv_name_list = []
         conv_list = []
         for u in indi.units:
             if u.type == 1:
-                conv_name = 'self.conv_%d_%d' % (u.in_channel, u.out_channel)
+                # UPDATED: incorporate groups in the conv name
+                conv_name = 'self.conv_%d_%d_g%d' % (u.in_channel, u.out_channel, u.groups)  # ADDED
                 if conv_name not in conv_name_list:
                     conv_name_list.append(conv_name)
-                    conv = '%s = BasicBlock(in_planes=%d, planes=%d)' % (conv_name, u.in_channel, u.out_channel)
+                    # UPDATED: pass groups param into BasicBlock
+                    conv = '%s = BasicBlock(in_planes=%d, planes=%d, stride=1, groups=%d)' % (
+                        conv_name, u.in_channel, u.out_channel, u.groups
+                    )
                     conv_list.append(conv)
 
-        # print('\n'.join(conv_list))
-
-        # query fully-connect layer
+        # Query final channel & image size for fully-connected layer
         out_channel_list = []
         image_output_size = 32
         for u in indi.units:
             if u.type == 1:
                 out_channel_list.append(u.out_channel)
             else:
-                out_channel_list.append(out_channel_list[-1])
+                # a pool unit halves the size (2x2 pooling)
+                if len(out_channel_list) == 0:
+                    # if the first layer is pooling, there's no prior out_channel, default is input channel
+                    out_channel_list.append(StatusUpdateTool.get_input_channel())
                 image_output_size = int(image_output_size / 2)
-        fully_layer_name = 'self.linear = nn.Linear(%d, %d)' % (
-        image_output_size * image_output_size * out_channel_list[-1], StatusUpdateTool.get_num_class())
-        # print(fully_layer_name, out_channel_list, image_output_size)
+                # keep same out_channel
+                out_channel_list.append(out_channel_list[-1])
 
-        # generate the forward part
+        # final out_channel is the last element
+        fully_layer_name = 'self.linear = nn.Linear(%d, %d)' % (
+            image_output_size * image_output_size * out_channel_list[-1],
+            StatusUpdateTool.get_num_class()
+        )
+
+        # Generate the forward part
         forward_list = []
         for i, u in enumerate(indi.units):
             if i == 0:
@@ -439,17 +446,17 @@ class Utils(object):
             else:
                 last_out_put = 'out_%d' % (i - 1)
             if u.type == 1:
-                _str = 'out_%d = self.conv_%d_%d(%s)' % (i, u.in_channel, u.out_channel, last_out_put)
+                # UPDATED: match conv name to what we used above with groups
+                _str = 'out_%d = self.conv_%d_%d_g%d(%s)' % (i, u.in_channel, u.out_channel, u.groups, last_out_put)  # ADDED
                 forward_list.append(_str)
-
             else:
                 if u.max_or_avg < 0.5:
                     _str = 'out_%d = F.max_pool2d(out_%d, 2)' % (i, i - 1)
                 else:
                     _str = 'out_%d = F.avg_pool2d(out_%d, 2)' % (i, i - 1)
                 forward_list.append(_str)
+
         forward_list.append('out = out_%d' % (len(indi.units) - 1))
-        # print('\n'.join(forward_list))
 
         part1, part2, part3 = cls.read_template()
         _str = []
@@ -458,17 +465,17 @@ class Utils(object):
         _str.append(current_time)
         _str.append('"""')
         _str.extend(part1)
-        _str.append('\n        %s' % ('#conv unit'))
+        _str.append('\n        #conv unit')
         for s in conv_list:
             _str.append('        %s' % (s))
-        _str.append('\n        %s' % ('#linear unit'))
+        _str.append('\n        #linear unit')
         _str.append('        %s' % (fully_layer_name))
 
         _str.extend(part2)
         for s in forward_list:
             _str.append('        %s' % (s))
         _str.extend(part3)
-        # print('\n'.join(_str))
+
         file_name = './scripts/%s.py' % (indi.id)
         script_file_handler = open(file_name, 'w')
         script_file_handler.write('\n'.join(_str))
@@ -484,11 +491,7 @@ class Utils(object):
 
 
 if __name__ == '__main__':
-    #     pops = Utils.load_population('begin', 0)
-    #     individuals = pops.individuals
-    #     indi = individuals[0]
-    #     u = Utils()
-    #     u.generate_pytorch_file(indi)
+    # Example usage: writing a small string to a file
     _str = 'test\n test1'
     _file = './populations/ENV_00.txt'
     Utils.write_to_file(_str, _file)

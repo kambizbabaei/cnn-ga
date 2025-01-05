@@ -183,19 +183,22 @@ class Log(object):
         cls.__get_logger().error(_str)
 
 class GPUTools(object):
+    """
+    A utility class for managing and querying NVIDIA GPU resources using NVML.
+    """
 
     @classmethod
-    def _get_equipped_gpu_ids_and_used_gpu_info(cls):
+    def _get_equipped_gpu_ids_and_used_gpu_ids(cls):
         """
-        Retrieves the list of equipped GPU IDs and information about GPU usage.
+        Retrieves the list of equipped GPU IDs and identifies which GPUs are currently in use.
 
         Returns:
             tuple:
                 equipped_gpu_ids (list of str): List of GPU IDs as strings (e.g., ["0", "1"]).
-                gpu_info_list (list of str): List of strings containing GPU usage information.
+                used_gpu_ids (set of str): Set of GPU IDs that are currently in use.
         """
         equipped_gpu_ids = []
-        gpu_info_list = []
+        used_gpu_ids = set()
 
         try:
             # Initialize NVML
@@ -217,26 +220,16 @@ class GPUTools(object):
 
                     # Check if GPU is of type GeForce or Tesla
                     if 'GeForce' in gpu_name or 'Tesla' in gpu_name:
-                        equipped_gpu_ids.append(str(i))
-                        Log.debug(f"GPU {i} is equipped and recognized as GeForce/Tesla.")
+                        gpu_id_str = str(i)
+                        equipped_gpu_ids.append(gpu_id_str)
+                        Log.debug(f"GPU {gpu_id_str} is equipped and recognized as GeForce/Tesla.")
 
-                    # Get list of processes using this GPU
-                    processes = nvmlDeviceGetComputeRunningProcesses(handle)
-                    Log.debug(f"GPU {i} has {len(processes)} running compute processes.")
-
-                    for proc in processes:
-                        pid = proc.pid
-                        try:
-                            process_name = nvmlSystemGetProcessName(pid)
-                        except NVMLError as e:
-                            Log.warn(f"Could not retrieve process name for PID {pid}: {e}")
-                            process_name = "Unknown"
-
-                        # Format the GPU usage information string
-                        # Example format: "0   python.exe   PID: 21576   Memory: N/A"
-                        gpu_info = f"{i}   {process_name}   PID: {pid}   Memory: N/A"
-                        gpu_info_list.append(gpu_info)
-                        Log.debug(f"Added GPU Info: {gpu_info}")
+                        # Get list of processes using this GPU
+                        processes = nvmlDeviceGetComputeRunningProcesses(handle)
+                        process_count = len(processes)
+                        Log.debug(f"GPU {gpu_id_str} has {process_count} running compute process(es).")
+                        if process_count > 0:
+                            used_gpu_ids.add(gpu_id_str)
 
                 except NVMLError as e:
                     Log.error(f"NVML error while processing GPU {i}: {e}")
@@ -254,51 +247,70 @@ class GPUTools(object):
             except:
                 pass  # NVML may not have been initialized; ignore shutdown errors
 
-        return equipped_gpu_ids, gpu_info_list
+        return equipped_gpu_ids, used_gpu_ids
 
     @classmethod
     def get_available_gpu_ids(cls):
-        equipped_gpu_ids, gpu_info_list = cls._get_equipped_gpu_ids_and_used_gpu_info()
+        """
+        Determines the list of available GPU IDs that are not currently in use.
 
-        used_gpu_ids = []
-        for each_used_info in gpu_info_list:
-            if 'python' in each_used_info:
-                used_gpu_ids.append((each_used_info.strip().split(' ', 1)[0]))
+        Returns:
+            list of str: List of available GPU IDs as strings. Empty list if no GPUs are available.
+        """
+        equipped_gpu_ids, used_gpu_ids = cls._get_equipped_gpu_ids_and_used_gpu_ids()
 
-        unused_gpu_ids = []
-        for id_ in equipped_gpu_ids:
-            if id_ not in used_gpu_ids:
-                unused_gpu_ids.append(id_)
+        # Determine unused GPUs by excluding used GPUs from equipped GPUs
+        unused_gpu_ids = [gpu_id for gpu_id in equipped_gpu_ids if gpu_id not in used_gpu_ids]
+
+        if not unused_gpu_ids:
+            Log.info("No available GPUs. All equipped GPUs are currently in use.")
+        else:
+            Log.info(f"Available GPUs: {unused_gpu_ids}")
+
+        Log.debug(f"Equipped GPUs: {equipped_gpu_ids}")
+        Log.debug(f"Used GPUs: {sorted(used_gpu_ids)}")
+        Log.debug(f"Unused GPUs: {unused_gpu_ids}")
 
         return unused_gpu_ids
 
     @classmethod
     def detect_available_gpu_id(cls):
+        """
+        Selects an available GPU ID for use.
+
+        Returns:
+            str or None: The selected GPU ID as a string, or None if no GPUs are available.
+        """
         unused_gpu_ids = cls.get_available_gpu_ids()
-        if len(unused_gpu_ids) == 0:
+        if not unused_gpu_ids:
             Log.info('GPU_QUERY-No available GPU')
             return None
         else:
-            Log.info('GPU_QUERY-Available GPUs are: [%s], choose GPU#%s to use'
-                     % (','.join(unused_gpu_ids), unused_gpu_ids[0]))
-            return int(unused_gpu_ids[0])
+            selected_gpu = unused_gpu_ids[0]
+            Log.info(f'GPU_QUERY-Available GPUs are: [{",".join(unused_gpu_ids)}], choose GPU#{selected_gpu} to use')
+            return selected_gpu  # Return as string for consistency
 
     @classmethod
     def all_gpu_available(cls):
-        _, gpu_info_list = cls._get_equipped_gpu_ids_and_used_gpu_info()
+        """
+        Checks if all equipped GPUs are available (i.e., not occupied by any processes).
 
-        used_gpu_ids = []
-        for each_used_info in gpu_info_list:
-            if 'python' in each_used_info:
-                used_gpu_ids.append((each_used_info.strip().split(' ', 1)[0]))
-        if len(used_gpu_ids) == 0:
-            Log.info('GPU_QUERY-None of the GPU is occupied')
+        Returns:
+            bool: True if all GPUs are available, False otherwise.
+        """
+        equipped_gpu_ids, used_gpu_ids = cls._get_equipped_gpu_ids_and_used_gpu_ids()
+
+        if not equipped_gpu_ids:
+            Log.info("No equipped GPUs of specified types found.")
+            return True  # Assuming no GPUs means all (zero) GPUs are available
+
+        if not used_gpu_ids:
+            Log.info('GPU_QUERY-None of the GPUs are occupied')
             return True
         else:
-            Log.info('GPU_QUERY- GPUs [%s] are occupying' % (','.join(used_gpu_ids)))
+            occupied_gpus = sorted(used_gpu_ids)
+            Log.info(f'GPU_QUERY- GPUs [{",".join(occupied_gpus)}] are occupying')
             return False
-
-
 class Utils(object):
     _lock = multiprocessing.Lock()
 

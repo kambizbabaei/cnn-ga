@@ -7,6 +7,16 @@ import logging
 import sys
 import multiprocessing
 import time
+from pynvml import (
+    nvmlInit,
+    nvmlShutdown,
+    nvmlDeviceGetCount,
+    nvmlDeviceGetHandleByIndex,
+    nvmlDeviceGetName,
+    nvmlDeviceGetComputeRunningProcesses,
+    nvmlSystemGetProcessName,
+    NVMLError,
+)
 
 class StatusUpdateTool(object):
     @classmethod
@@ -165,31 +175,84 @@ class Log(object):
     @classmethod
     def warn(cls, _str):
         cls.__get_logger().warning(_str)
-
+    @classmethod
+    def debug(cls, _str):
+        cls.__get_logger().debug(_str)
+    @classmethod
+    def erroe(cls, _str):
+        cls.__get_logger().error(_str)
 
 class GPUTools(object):
 
     @classmethod
     def _get_equipped_gpu_ids_and_used_gpu_info(cls):
-        p = Popen('nvidia-smi', stdout=PIPE)
-        output_info = p.stdout.read().decode('UTF-8')
-        lines = output_info.split(os.linesep)
-        equipped_gpu_ids = []
-        for line_info in lines:
-            if not line_info.startswith(' '):
-                if 'GeForce' in line_info:
-                    equipped_gpu_ids.append(line_info.strip().split(' ', 4)[3])
-                if 'Tesla' in line_info:
-                    equipped_gpu_ids.append(line_info.strip().split(' ', 4)[3])
-            else:
-                break
+        """
+        Retrieves the list of equipped GPU IDs and information about GPU usage.
 
+        Returns:
+            tuple:
+                equipped_gpu_ids (list of str): List of GPU IDs as strings (e.g., ["0", "1"]).
+                gpu_info_list (list of str): List of strings containing GPU usage information.
+        """
+        equipped_gpu_ids = []
         gpu_info_list = []
-        for line_no in range(len(lines) - 3, -1, -1):
-            if lines[line_no].startswith('|==='):
-                break
-            else:
-                gpu_info_list.append(lines[line_no][1:-1].strip())
+
+        try:
+            # Initialize NVML
+            nvmlInit()
+            Log.debug("NVML initialized successfully.")
+
+            # Get the number of GPUs
+            device_count = nvmlDeviceGetCount()
+            Log.info(f"Number of GPUs detected: {device_count}")
+
+            for i in range(device_count):
+                try:
+                    # Get handle for each GPU
+                    handle = nvmlDeviceGetHandleByIndex(i)
+
+                    # Get GPU name
+                    gpu_name = nvmlDeviceGetName(handle)
+                    Log.debug(f"GPU {i} Name: {gpu_name}")
+
+                    # Check if GPU is of type GeForce or Tesla
+                    if 'GeForce' in gpu_name or 'Tesla' in gpu_name:
+                        equipped_gpu_ids.append(str(i))
+                        Log.debug(f"GPU {i} is equipped and recognized as GeForce/Tesla.")
+
+                    # Get list of processes using this GPU
+                    processes = nvmlDeviceGetComputeRunningProcesses(handle)
+                    Log.debug(f"GPU {i} has {len(processes)} running compute processes.")
+
+                    for proc in processes:
+                        pid = proc.pid
+                        try:
+                            process_name = nvmlSystemGetProcessName(pid)
+                        except NVMLError as e:
+                            Log.warning(f"Could not retrieve process name for PID {pid}: {e}")
+                            process_name = "Unknown"
+
+                        # Format the GPU usage information string
+                        # Example format: "0   python.exe   PID: 21576   Memory: N/A"
+                        gpu_info = f"{i}   {process_name}   PID: {pid}   Memory: N/A"
+                        gpu_info_list.append(gpu_info)
+                        Log.debug(f"Added GPU Info: {gpu_info}")
+
+                except NVMLError as e:
+                    Log.error(f"NVML error while processing GPU {i}: {e}")
+                except Exception as e:
+                    Log.error(f"Unexpected error while processing GPU {i}: {e}")
+
+        except NVMLError as e:
+            Log.error(f"Failed to initialize NVML: {e}")
+        except Exception as e:
+            Log.error(f"Unexpected error during NVML initialization: {e}")
+        finally:
+            try:
+                nvmlShutdown()
+                Log.debug("NVML shutdown successfully.")
+            except:
+                pass  # NVML may not have been initialized; ignore shutdown errors
 
         return equipped_gpu_ids, gpu_info_list
 

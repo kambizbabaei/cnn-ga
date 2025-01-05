@@ -46,8 +46,6 @@ class FitnessEvaluate(object):
             # Only train if not cached
             if indi.acc < 0:
                 has_evaluated_offspring = True
-                # (Optional) small delay so processes don't all start simultaneously
-                time.sleep(60)
 
                 # 1) Wait until a GPU is free
                 gpu_id = GPUTools.detect_available_gpu_id()

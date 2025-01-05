@@ -179,7 +179,7 @@ class Log(object):
     def debug(cls, _str):
         cls.__get_logger().debug(_str)
     @classmethod
-    def erroe(cls, _str):
+    def error(cls, _str):
         cls.__get_logger().error(_str)
 
 class GPUTools(object):
@@ -229,7 +229,7 @@ class GPUTools(object):
                         try:
                             process_name = nvmlSystemGetProcessName(pid)
                         except NVMLError as e:
-                            Log.warning(f"Could not retrieve process name for PID {pid}: {e}")
+                            Log.warn(f"Could not retrieve process name for PID {pid}: {e}")
                             process_name = "Unknown"
 
                         # Format the GPU usage information string

@@ -72,9 +72,6 @@ class FitnessEvaluate(object):
                 # 3) Spawn the training process for this individual
                 p = Process(target=cls_obj.do_work, args=(str(gpu_id), file_name,))
                 p.start()
-
-                # 4) Join right away => only one model runs on the GPU at a time
-                p.join()
             else:
                 # Already has fitness from cache
                 file_name = indi.id

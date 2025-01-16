@@ -12,9 +12,6 @@ from datetime import datetime
 import multiprocessing
 from utils import StatusUpdateTool
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # Dynamic device selection
-
-
 class BasicBlock(nn.Module):
     expansion = 1
 
@@ -140,7 +137,7 @@ class TrainModel(object):
 
         net = EvoCNNModel()
         cudnn.benchmark = True
-        net.to(device)
+        net = net.cuda()
 
         criterion = nn.CrossEntropyLoss()
         best_acc = 0.0

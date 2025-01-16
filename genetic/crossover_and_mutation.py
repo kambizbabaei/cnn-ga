@@ -210,7 +210,6 @@ class Crossover(object):
                       % (len(new_offspring_list), _stat_param['offspring_new'], _stat_param['offspring_from_parent']))
         return new_offspring_list
 
-
 class Mutation(object):
     def __init__(self, individuals, prob_, _log):
         self.individuals = individuals
@@ -220,13 +219,13 @@ class Mutation(object):
     def do_mutation(self):
         _stat_param = {'offspring_new': 0, 'offspring_from_parent': 0,
                        'ADD': 0, 'REMOVE': 0, 'CHANNEL': 0, 'POOLING_TYPE': 0}
-        mutation_list = StatusUpdateTool.get_mutation_probs_for_each()  # 4 probabilities
+        mutation_probs = StatusUpdateTool.get_mutation_probs_for_each()  # 4 probabilities
 
         for indi in self.individuals:
             p_ = random.random()
             if p_ < self.prob:
                 _stat_param['offspring_new'] += 1
-                mutation_type = self.select_mutation_type(mutation_list)
+                mutation_type = self.select_mutation_type(mutation_probs)
                 if mutation_type == 0:
                     _stat_param['ADD'] += 1
                     self.do_add_unit_mutation(indi)
@@ -350,8 +349,9 @@ class Mutation(object):
         if random.random() < change_groups_chance:
             old_groups = indi.units[conv_idx].groups
             in_ch = indi.units[conv_idx].in_channel
-            # pick new groups from [1,2,4] that divides in_ch
-            possible_groups = [g for g in [1,2,4] if (in_ch % g == 0)]
+            out_ch = indi.units[conv_idx].out_channel  # Ensure out_channel is considered
+            # pick new groups from indi.groups_count that divides both in_ch and out_ch
+            possible_groups = [g for g in indi.groups_count if (in_ch % g == 0 and out_ch % g == 0)]
             if possible_groups:
                 new_groups = np.random.choice(possible_groups)
                 if new_groups != old_groups:
@@ -364,6 +364,7 @@ class Mutation(object):
         # (Your original code for changing input/out channels)
         old_in = indi.units[conv_idx].in_channel
         new_in = random.choice(channel_list)
+
         if new_in != old_in:
             # but we won't forcibly override if conv_idx=0. Usually that must match the image channel, 
             # or handle carefully. Let's be consistent with your original code logic:

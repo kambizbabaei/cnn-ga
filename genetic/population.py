@@ -1,37 +1,39 @@
 import numpy as np
 import hashlib
 import copy
+import random
 
 class Unit(object):
     def __init__(self, number):
         self.number = number
 
-
 class ResUnit(Unit):
-    def __init__(self, number, in_channel, out_channel, groups=1):  # << ADDED groups param
-        """
-        A convolutional unit with optional grouping.
-        type=1 identifies this as a "conv" type in the pipeline.
-        """
+    def __init__(self, number, in_channel, out_channel, groups=1):  # added groups
         super().__init__(number)
         self.type = 1
         self.in_channel = in_channel
         self.out_channel = out_channel
-        self.groups = groups  # << Store number of groups
-
+        self.groups = groups  # added groups parameter
 
 class PoolUnit(Unit):
     def __init__(self, number, max_or_avg):
         super().__init__(number)
         self.type = 2
-        self.max_or_avg = max_or_avg  # max_pool for < 0.5, otherwise avg_pool
+        self.max_or_avg = max_or_avg  # max_pool for < 0.5, avg_pool for >= 0.5
 
+class GroupedPointwiseBlock(Unit):
+    def __init__(self, number, in_channel, out_channel, groups=2):
+        super().__init__(number)
+        self.type = 3  # Added to denote this as a grouped pointwise block
+        self.in_channel = in_channel
+        self.out_channel = out_channel
+        self.groups = groups
 
 class Individual(object):
     def __init__(self, params, indi_no):
         self.acc = -1.0
-        self.id = indi_no  # for record the id of current individual
-        self.number_id = 0  # for record the latest number assigned to a basic unit
+        self.id = indi_no
+        self.number_id = 0
         self.min_conv = params['min_conv']
         self.max_conv = params['max_conv']
         self.min_pool = params['min_pool']
@@ -39,83 +41,76 @@ class Individual(object):
         self.max_len = params['max_len']
         self.image_channel = params['image_channel']
         self.output_channles = params['output_channel']
+        self.groups_count = params['groups_count']
+        self.group_block_percentage = params['group_block_percentage']
         self.units = []
 
     def reset_acc(self):
         self.acc = -1.0
 
     def initialize(self):
-        """
-        Randomly initialize how many convolution + pooling layers this Individual will have,
-        and in which order they appear.
-        """
-        # 1) Determine how many conv + pool layers will be used
         num_conv = np.random.randint(self.min_conv, self.max_conv + 1)
         num_pool = np.random.randint(self.min_pool, self.max_pool + 1)
+        availabel_positions = list(range(num_conv))
+        np.random.shuffle(availabel_positions)
+        select_positions = np.sort(availabel_positions[0:num_pool])
 
-        # 2) Randomly choose positions where pooling layers will appear among conv layers
-        available_positions = list(range(num_conv))
-        np.random.shuffle(available_positions)
-        select_positions = np.sort(available_positions[0:num_pool])
-
-        # 3) Build a list, e.g. [conv, conv, pool, conv, ...] to indicate the order
         all_positions = []
         for i in range(num_conv):
-            all_positions.append(1)  # 1 denotes conv
+            all_positions.append(1)
             for j in select_positions:
                 if j == i:
-                    all_positions.append(2)  # 2 denotes pool
+                    all_positions.append(2)
                     break
 
-        # 4) Initialize the layers based on all_positions
         input_channel = self.image_channel
-        for pos_type in all_positions:
-            if pos_type == 1:  # conv
-                conv = self.init_a_conv(_number=None, _in_channel=input_channel, _out_channel=None)
+        for i in all_positions:
+            if i == 1:
+                is_first_layar = len(self.units) == 0
+                conv = self.init_a_conv(_number=None, _in_channel=input_channel, _out_channel=None,is_first_layar=is_first_layar)
                 input_channel = conv.out_channel
                 self.units.append(conv)
-            elif pos_type == 2:  # pool
+            elif i == 2:
                 pool = self.init_a_pool(_number=None, _max_or_avg=None)
                 self.units.append(pool)
+                
+    def calculate_new_size(self, current_size, conv_layer):
+        # Calculate the new image size after a convolution (assuming padding=1, stride=1)
+        # Convolution with kernel size 3x3 reduces the size by 2 (padding=1, stride=1)
+        return current_size - 2
 
-    def init_a_conv(self, _number, _in_channel, _out_channel):
-        """
-        Create a ResUnit (conv) with random output_channel and random grouping,
-        subject to the in_channel constraints.
-        """
-        if _number is not None:
+    def init_a_conv(self, _number, _in_channel, _out_channel,is_first_layar):
+        if _number:
             number = _number
         else:
             number = self.number_id
             self.number_id += 1
 
-        if _out_channel is not None:
+        if _out_channel:
             out_channel = _out_channel
         else:
             out_channel = self.output_channles[np.random.randint(0, len(self.output_channles))]
-
-        # << ADDED: Randomly choose groups from a small set [1,2,4], ensuring it divides in_channel
-        possible_groups = [g for g in [1, 2, 4] if (_in_channel % g == 0)]
-        if not possible_groups:
+        groups = np.random.choice(self.groups_count)
+        # Decide between a basic convolutional layer or a grouped pointwise block (with a probability)
+        if(is_first_layar):
             groups = 1
+        if np.random.rand() < self.group_block_percentage :
+            block_type = 'grouped_pointwise'
+            conv = GroupedPointwiseBlock(number, _in_channel, out_channel, groups=groups)
         else:
-            groups = np.random.choice(possible_groups)
+            block_type = 'basic'
+            conv = ResUnit(number, _in_channel, out_channel,groups)
 
-        # Create a new conv unit (ResUnit) with the selected groups
-        conv = ResUnit(number, _in_channel, out_channel, groups=groups)
         return conv
 
     def init_a_pool(self, _number, _max_or_avg):
-        """
-        Create a PoolUnit. max_or_avg < 0.5 => MaxPool, else AvgPool
-        """
-        if _number is not None:
+        if _number:
             number = _number
         else:
             number = self.number_id
             self.number_id += 1
 
-        if _max_or_avg is not None:
+        if _max_or_avg:
             max_or_avg = _max_or_avg
         else:
             max_or_avg = np.random.rand()
@@ -125,74 +120,65 @@ class Individual(object):
 
     def uuid(self):
         """
-        Create a unique hash key for this Individual by concatenating all
-        layer definitions (type, in/out channels, grouping, etc.).
+        Generate a unique identifier for this individual by combining all units' details
         """
         _str = []
         for unit in self.units:
             _sub_str = []
-            if unit.type == 1:
-                # conv
+            if unit.type == 1:  # BasicBlock (ResUnit)
                 _sub_str.append('conv')
                 _sub_str.append(f'number:{unit.number}')
                 _sub_str.append(f'in:{unit.in_channel}')
                 _sub_str.append(f'out:{unit.out_channel}')
-                # << ADDED: include groups
-                _sub_str.append(f'groups:{unit.groups}')
-            elif unit.type == 2:
-                # pool
+            elif unit.type == 2:  # PoolUnit
                 _sub_str.append('pool')
                 _sub_str.append(f'number:{unit.number}')
-                _pool_type = 0.25 if unit.max_or_avg < 0.5 else 0.75
-                _sub_str.append(f'type:{_pool_type:.1f}')
+                _sub_str.append(f'type:{unit.max_or_avg}')
+            elif unit.type == 3:  # GroupedPointwiseBlock
+                _sub_str.append('grouped_pointwise')
+                _sub_str.append(f'number:{unit.number}')
+                _sub_str.append(f'in:{unit.in_channel}')
+                _sub_str.append(f'out:{unit.out_channel}')
+                _sub_str.append(f'groups:{unit.groups}')
 
-            _str.append(f"[{','.join(_sub_str)}]")
-
+            _str.append(f'[{",".join(_sub_str)}]')
         _final_str_ = '-'.join(_str)
         _final_utf8_str_ = _final_str_.encode('utf-8')
         _hash_key = hashlib.sha224(_final_utf8_str_).hexdigest()
         return _hash_key, _final_str_
 
     def __str__(self):
-        """
-        String representation of the Individual for logging or saving.
-        """
-        _str = []
-        _str.append(f"indi:{self.id}")
-        _str.append(f"Acc:{self.acc:.5f}")
+        _str = [f'indi:{self.id}', f'Acc:{self.acc:.5f}']
         for unit in self.units:
             _sub_str = []
-            if unit.type == 1:
+            if unit.type == 1:  # BasicBlock (ResUnit)
                 _sub_str.append('conv')
                 _sub_str.append(f'number:{unit.number}')
                 _sub_str.append(f'in:{unit.in_channel}')
                 _sub_str.append(f'out:{unit.out_channel}')
-                # << ADDED groups to print
-                _sub_str.append(f'groups:{unit.groups}')
-            elif unit.type == 2:
+            elif unit.type == 2:  # PoolUnit
                 _sub_str.append('pool')
                 _sub_str.append(f'number:{unit.number}')
-                _sub_str.append(f'type:{unit.max_or_avg:.1f}')
-            _str.append(f"[{','.join(_sub_str)}]")
+                _sub_str.append(f'type:{unit.max_or_avg}')
+            elif unit.type == 3:  # GroupedPointwiseBlock
+                _sub_str.append('grouped_pointwise')
+                _sub_str.append(f'number:{unit.number}')
+                _sub_str.append(f'in:{unit.in_channel}')
+                _sub_str.append(f'out:{unit.out_channel}')
+                _sub_str.append(f'groups:{unit.groups}')
+            _str.append(f'[{",".join(_sub_str)}]')
         return '\n'.join(_str)
 
 
 class Population(object):
     def __init__(self, params, gen_no):
-        """
-        A Population holds a list of Individuals for a specific generation index.
-        """
         self.gen_no = gen_no
-        self.number_id = 0  # how many individuals have been generated so far
+        self.number_id = 0  # for recording how many individuals have been generated
         self.pop_size = params['pop_size']
         self.params = params
         self.individuals = []
 
     def initialize(self):
-        """
-        Creates a brand new population of Individuals,
-        each randomly initialized.
-        """
         for _ in range(self.pop_size):
             indi_no = f'indi{self.gen_no:02d}{self.number_id:02d}'
             self.number_id += 1
@@ -201,11 +187,6 @@ class Population(object):
             self.individuals.append(indi)
 
     def create_from_offspring(self, offsprings):
-        """
-        After crossover + mutation, we have a new set of offspring. 
-        This function wraps them into a new Population object 
-        and reassigns IDs for clarity.
-        """
         for indi_ in offsprings:
             indi = copy.deepcopy(indi_)
             indi_no = f'indi{self.gen_no:02d}{self.number_id:02d}'
@@ -215,11 +196,44 @@ class Population(object):
             self.individuals.append(indi)
 
     def __str__(self):
-        """
-        Summarize all Individuals in this Population as a single string.
-        """
         _str = []
         for ind in self.individuals:
             _str.append(str(ind))
             _str.append('-' * 100)
         return '\n'.join(_str)
+
+
+# Example Testing Functions
+def test_individual():
+    params = {
+        'min_conv': 3,
+        'max_conv': 5,
+        'min_pool': 1,
+        'max_pool': 2,
+        'max_len': 10,
+        'image_channel': 3,
+        'output_channel': [64, 128, 256, 512]
+    }
+    ind = Individual(params, 'indi00')
+    ind.initialize()
+    print(ind)
+    print(ind.uuid())
+
+def test_population():
+    params = {
+        'pop_size': 20,
+        'min_conv': 3,
+        'max_conv': 6,
+        'min_pool': 1,
+        'max_pool': 2,
+        'max_len': 10,
+        'image_channel': 3,
+        'output_channel': [64, 128, 256, 512]
+    }
+    pop = Population(params, 0)
+    pop.initialize()
+    print(pop)
+
+if __name__ == '__main__':
+    test_individual()
+    test_population()

@@ -120,18 +120,6 @@ class StatusUpdateTool(object):
         return p
 
     @classmethod
-    def get_init_params(cls):
-        params = {}
-        params['pop_size'] = cls.get_pop_size()
-        params['min_conv'], params['max_conv'] = cls.get_conv_limit()
-        params['min_pool'], params['max_pool'] = cls.get_pool_limit()
-        params['max_len'] = cls.get_individual_max_length()
-        params['image_channel'] = cls.get_input_channel()
-        params['output_channel'] = cls.get_output_channel()
-        params['genetic_prob'] = cls.get_genetic_probability()
-        return params
-
-    @classmethod
     def get_mutation_probs_for_each(cls):
         """
         We define 4 probabilities for each type of mutation:
@@ -146,6 +134,43 @@ class StatusUpdateTool(object):
         mutation_prob_list = [float(i) for i in rs]
         return mutation_prob_list
 
+    # New Methods Added Below
+
+    @classmethod
+    def get_groups_count(cls):
+        """
+        Retrieves the possible group counts for GroupedPointwiseBlock.
+        Returns a list of integers.
+        """
+        rs = cls.__read_ini_file('network', 'groups_count')
+        groups = []
+        for i in rs.split(','):
+            groups.append(int(i.strip()))
+        return groups
+
+    @classmethod
+    def get_group_block_percentage(cls):
+        """
+        Retrieves the probability of using GroupedPointwiseBlock when generating individuals.
+        Returns a float between 0 and 1.
+        """
+        rs = cls.__read_ini_file('network', 'group_block_percentage')
+        return float(rs.strip())
+
+    @classmethod
+    def get_init_params(cls):
+        params = {}
+        params['pop_size'] = cls.get_pop_size()
+        params['min_conv'], params['max_conv'] = cls.get_conv_limit()
+        params['min_pool'], params['max_pool'] = cls.get_pool_limit()
+        params['max_len'] = cls.get_individual_max_length()
+        params['image_channel'] = cls.get_input_channel()
+        params['output_channel'] = cls.get_output_channel()
+        params['genetic_prob'] = cls.get_genetic_probability()
+        # Add new parameters to init_params
+        params['groups_count'] = cls.get_groups_count()
+        params['group_block_percentage'] = cls.get_group_block_percentage()
+        return params
 
 class Log(object):
     _logger = None
@@ -476,38 +501,36 @@ class Utils(object):
             line = f.readline().rstrip()
 
         return part1, part2, part3
-
     @classmethod
     def generate_pytorch_file(cls, indi):
         # Query all conv units
         conv_name_list = []
         conv_list = []
         for u in indi.units:
-            if u.type == 1:
-                # UPDATED: incorporate groups in the conv name
-                conv_name = 'self.conv_%d_%d_g%d' % (u.in_channel, u.out_channel, u.groups)  # ADDED
+            if u.type == 1:  # ResUnit
+                conv_name = f'self.conv_{u.in_channel}_{u.out_channel}_g{u.groups}'
                 if conv_name not in conv_name_list:
                     conv_name_list.append(conv_name)
-                    # UPDATED: pass groups param into BasicBlock
-                    conv = '%s = BasicBlock(in_planes=%d, planes=%d, stride=1, groups=%d)' % (
-                        conv_name, u.in_channel, u.out_channel, u.groups
-                    )
+                    conv = f'{conv_name} = BasicBlock(in_planes={u.in_channel}, planes={u.out_channel}, stride=1, groups={u.groups})'
+                    conv_list.append(conv)
+            elif u.type == 3:  # GroupedPointwiseBlock
+                conv_name = f'self.conv_{u.in_channel}_{u.out_channel}_g{u.groups}_gp'
+                if conv_name not in conv_name_list:
+                    conv_name_list.append(conv_name)
+                    conv = f'{conv_name} = GroupedPointwiseBlock(in_channels={u.in_channel}, out_channels={u.out_channel}, groups={u.groups})'
                     conv_list.append(conv)
 
         # Query final channel & image size for fully-connected layer
         out_channel_list = []
         image_output_size = 32
         for u in indi.units:
-            if u.type == 1:
+            if u.type == 1 or u.type == 3:
                 out_channel_list.append(u.out_channel)
             else:
-                # a pool unit halves the size (2x2 pooling)
-                if len(out_channel_list) == 0:
-                    # if the first layer is pooling, there's no prior out_channel, default is input channel
-                    out_channel_list.append(StatusUpdateTool.get_input_channel())
+                out_channel_list.append(out_channel_list[-1])
                 image_output_size = int(image_output_size / 2)
                 # keep same out_channel
-                out_channel_list.append(out_channel_list[-1])
+                
 
         # final out_channel is the last element
         fully_layer_name = 'self.linear = nn.Linear(%d, %d)' % (
@@ -521,19 +544,21 @@ class Utils(object):
             if i == 0:
                 last_out_put = 'x'
             else:
-                last_out_put = 'out_%d' % (i - 1)
+                last_out_put = f'out_{i - 1}'
             if u.type == 1:
-                # UPDATED: match conv name to what we used above with groups
-                _str = 'out_%d = self.conv_%d_%d_g%d(%s)' % (i, u.in_channel, u.out_channel, u.groups, last_out_put)  # ADDED
+                _str = f'out_{i} = self.conv_{u.in_channel}_{u.out_channel}_g{u.groups}({last_out_put})'  # ADDED
+                forward_list.append(_str)
+            elif u.type == 3:  # GroupedPointwiseBlock
+                _str = f'out_{i} = self.conv_{u.in_channel}_{u.out_channel}_g{u.groups}_gp({last_out_put})'
                 forward_list.append(_str)
             else:
                 if u.max_or_avg < 0.5:
-                    _str = 'out_%d = F.max_pool2d(out_%d, 2)' % (i, i - 1)
+                    _str = f'out_{i} = F.max_pool2d(out_{i - 1}, 2)'
                 else:
-                    _str = 'out_%d = F.avg_pool2d(out_%d, 2)' % (i, i - 1)
+                    _str = f'out_{i} = F.avg_pool2d(out_{i - 1}, 2)'
                 forward_list.append(_str)
 
-        forward_list.append('out = out_%d' % (len(indi.units) - 1))
+        forward_list.append(f'out = out_{len(indi.units) - 1}')
 
         part1, part2, part3 = cls.read_template()
         _str = []
@@ -544,27 +569,27 @@ class Utils(object):
         _str.extend(part1)
         _str.append('\n        #conv unit')
         for s in conv_list:
-            _str.append('        %s' % (s))
+            _str.append(f'        {s}')
         _str.append('\n        #linear unit')
-        _str.append('        %s' % (fully_layer_name))
+        _str.append(f'        {fully_layer_name}')
 
         _str.extend(part2)
         for s in forward_list:
-            _str.append('        %s' % (s))
+            _str.append(f'        {s}')
         _str.extend(part3)
 
-        file_name = './scripts/%s.py' % (indi.id)
+        file_name = f'./scripts/{indi.id}.py'
         script_file_handler = open(file_name, 'w')
         script_file_handler.write('\n'.join(_str))
         script_file_handler.flush()
         script_file_handler.close()
 
-    @classmethod
-    def write_to_file(cls, _str, _file):
-        f = open(_file, 'w')
-        f.write(_str)
-        f.flush()
-        f.close()
+        @classmethod
+        def write_to_file(cls, _str, _file):
+            f = open(_file, 'w')
+            f.write(_str)
+            f.flush()
+            f.close()
 
 
 if __name__ == '__main__':

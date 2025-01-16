@@ -129,5 +129,9 @@ class EvolveCNN(object):
 
 if __name__ == '__main__':
     params = StatusUpdateTool.get_init_params()
+    Log.info("Loaded Parameters:")
+    for key, value in params.items():
+        Log.info(f"{key}: {value}")
+    
     evoCNN = EvolveCNN(params)
     evoCNN.do_work(max_gen=20)

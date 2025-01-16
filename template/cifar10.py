@@ -12,16 +12,16 @@ from datetime import datetime
 import multiprocessing
 from utils import StatusUpdateTool
 
-torch.device("cuda")  # Force device to cuda if available
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # Dynamic device selection
 
 
 class BasicBlock(nn.Module):
     expansion = 1
-    
+
     # ADDED: groups parameter with default=1
     def __init__(self, in_planes, planes, stride=1, groups=1):
         super(BasicBlock, self).__init__()
-        
+
         # UPDATED: include groups in the Conv2d layers
         self.conv1 = nn.Conv2d(
             in_planes, planes, kernel_size=3, stride=stride,
@@ -50,6 +50,60 @@ class BasicBlock(nn.Module):
         out += self.shortcut(x)
         out = F.relu(out)
         return out
+
+
+class GroupedPointwiseBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, groups=2, interleave=True):
+        super(GroupedPointwiseBlock, self).__init__()
+        self.groups = groups
+        self.interleave = interleave
+
+        # Ensure divisibility
+        assert in_channels % groups == 0, "in_channels must be divisible by groups"
+        assert out_channels % groups == 0, "out_channels must be divisible by groups"
+
+        # Create parallel 1x1 conv branches
+        self.branch_convs = nn.ModuleList([
+            nn.Conv2d(
+                in_channels // groups,
+                out_channels // groups,
+                kernel_size=1,
+                bias=False
+            ) for _ in range(groups)
+        ])
+
+        self.bn = nn.BatchNorm2d(out_channels)
+
+    def forward(self, x):
+        # 1) Split input by channels into 'groups'
+        splits = torch.chunk(x, self.groups, dim=1)
+
+        # 2) Pass each split through its corresponding 1x1 conv
+        out_splits = [conv(split) for conv, split in zip(self.branch_convs, splits)]
+
+        # 3) Concatenate outputs along channel dimension
+        out = torch.cat(out_splits, dim=1)  # shape: (N, out_channels, H, W)
+
+        # 4) Optionally apply channel shuffle
+        if self.interleave and self.groups > 1:
+            out = self.channel_shuffle(out, self.groups)
+
+        # 5) Batch norm + ReLU
+        out = self.bn(out)
+        out = F.relu(out)
+        return out
+
+    def channel_shuffle(self, x, groups):
+        batch_size, num_channels, height, width = x.size()
+        channels_per_group = num_channels // groups
+
+        # reshape: (batch, groups, channels_per_group, height, width)
+        x = x.view(batch_size, groups, channels_per_group, height, width)
+        # transpose to shuffle
+        x = x.transpose(1, 2).contiguous()
+        # flatten
+        x = x.view(batch_size, -1, height, width)
+        return x
 
 
 class EvoCNNModel(nn.Module):
@@ -86,7 +140,7 @@ class TrainModel(object):
 
         net = EvoCNNModel()
         cudnn.benchmark = True
-        net.to('cuda')
+        net.to(device)
 
         criterion = nn.CrossEntropyLoss()
         best_acc = 0.0
@@ -100,15 +154,16 @@ class TrainModel(object):
 
     def log_record(self, _str, first_time=None):
         dt = datetime.now()
-        dt.strftime('%Y-%m-%d %H:%M:%S')
+        dt_str = dt.strftime('%Y-%m-%d %H:%M:%S')
         if first_time:
             file_mode = 'w'
         else:
             file_mode = 'a+'
-        f = open('./log/%s.txt' % (self.file_id), file_mode)
-        f.write('[%s]-%s\n' % (dt, _str))
-        f.flush()
-        f.close()
+        log_dir = './log'
+        os.makedirs(log_dir, exist_ok=True)
+        with open(f'{log_dir}/{self.file_id}.txt', file_mode) as f:
+            f.write(f'[{dt_str}]-{_str}\n')
+            f.flush()
 
     def train(self, epoch):
         self.net.train()
@@ -134,7 +189,7 @@ class TrainModel(object):
         correct = 0
         for _, data in enumerate(self.trainloader, 0):
             inputs, labels = data
-            inputs, labels = Variable(inputs.cuda()), Variable(labels.cuda())
+            inputs, labels = inputs.to(device), labels.to(device)
 
             optimizer.zero_grad()
             outputs = self.net(inputs)
@@ -145,37 +200,40 @@ class TrainModel(object):
             running_loss += loss.item() * labels.size(0)
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
-            correct += (predicted == labels.data).sum()
+            correct += (predicted == labels).sum().item()
 
-        self.log_record('Train-Epoch:%3d,  Loss: %.3f, Acc:%.3f'
-                        % (epoch + 1, running_loss / total, (correct / total)))
+        train_loss = running_loss / total
+        train_acc = correct / total
+        self.log_record(f'Train-Epoch:{epoch + 1:3d},  Loss: {train_loss:.3f}, Acc:{train_acc:.3f}')
 
     def test(self, epoch):
         self.net.eval()
         test_loss = 0.0
         total = 0
         correct = 0
-        for _, data in enumerate(self.validate_loader, 0):
-            inputs, labels = data
-            inputs, labels = Variable(inputs.cuda()), Variable(labels.cuda())
-            outputs = self.net(inputs)
-            loss = self.criterion(outputs, labels)
-            test_loss += loss.item() * labels.size(0)
-            _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels.data).sum()
+        with torch.no_grad():
+            for _, data in enumerate(self.validate_loader, 0):
+                inputs, labels = data
+                inputs, labels = inputs.to(device), labels.to(device)
+                outputs = self.net(inputs)
+                loss = self.criterion(outputs, labels)
+                test_loss += loss.item() * labels.size(0)
+                _, predicted = torch.max(outputs.data, 1)
+                total += labels.size(0)
+                correct += (predicted == labels).sum().item()
 
-        if correct / total > self.best_acc:
-            self.best_acc = correct / total
+        validate_loss = test_loss / total
+        validate_acc = correct / total
+        if validate_acc > self.best_acc:
+            self.best_acc = validate_acc
 
-        self.log_record('Validate-Loss:%.3f, Acc:%.3f'
-                        % (test_loss / total, correct / total))
+        self.log_record(f'Validate-Loss:{validate_loss:.3f}, Acc:{validate_acc:.3f}')
 
     def process(self):
         total_epoch = StatusUpdateTool.get_epoch_size()
         for p in range(total_epoch):
             self.train(p)
-            self.test(total_epoch)
+            self.test(p)
         return self.best_acc
 
 
@@ -185,24 +243,17 @@ class RunModel(object):
         best_acc = 0.0
         m = TrainModel()
         try:
-            m.log_record('Used GPU#%s, worker name:%s[%d]'
-                         % (gpu_id, multiprocessing.current_process().name, os.getpid()),
-                         first_time=True)
+            m.log_record(f'Used GPU#{gpu_id}, worker name:{multiprocessing.current_process().name}[{os.getpid()}]',
+                        first_time=True)
             best_acc = m.process()
         except BaseException as e:
-            print('Exception occurs, file:%s, pid:%d...%s' % (file_id, os.getpid(), str(e)))
-            m.log_record('Exception occur:%s' % (str(e)))
+            print(f'Exception occurs, file:{file_id}, pid:{os.getpid()}...{str(e)}')
+            m.log_record(f'Exception occur:{str(e)}')
         finally:
-            m.log_record('Finished-Acc:%.3f' % best_acc)
-            with open('./populations/after_%s.txt' % (file_id[4:6]), 'a+') as f:
-                f.write('%s=%.5f\n' % (file_id, best_acc))
+            m.log_record(f'Finished-Acc:{best_acc:.3f}')
+            populations_dir = './populations'
+            os.makedirs(populations_dir, exist_ok=True)
+            with open(f'{populations_dir}/after_{file_id[4:6]}.txt', 'a+') as f:
+                f.write(f'{file_id}={best_acc:.5f}\n')
                 f.flush()
 """
-
-# ADDED or UPDATED Notes:
-# 1) groups was introduced into the BasicBlock __init__() as a parameter with default=1
-# 2) In self.conv1 and self.conv2, we now pass 'groups=groups'
-# 3) The placeholders for generated_init and generate_forward remain 
-#    so your GA can insert the layers/forward logic.
-# 4) Everything else in this file remains essentially the same
-#    but is ready to support grouped convolutions if the GA chooses to.

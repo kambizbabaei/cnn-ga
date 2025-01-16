@@ -186,7 +186,7 @@ class TrainModel(object):
         correct = 0
         for _, data in enumerate(self.trainloader, 0):
             inputs, labels = data
-            inputs, labels = inputs.to(device), labels.to(device)
+            inputs, labels = Variable(inputs.cuda()), Variable(labels.cuda())
 
             optimizer.zero_grad()
             outputs = self.net(inputs)
@@ -211,7 +211,7 @@ class TrainModel(object):
         with torch.no_grad():
             for _, data in enumerate(self.validate_loader, 0):
                 inputs, labels = data
-                inputs, labels = inputs.to(device), labels.to(device)
+                inputs, labels = Variable(inputs.cuda()), Variable(labels.cuda())
                 outputs = self.net(inputs)
                 loss = self.criterion(outputs, labels)
                 test_loss += loss.item() * labels.size(0)

@@ -584,12 +584,12 @@ class Utils(object):
         script_file_handler.flush()
         script_file_handler.close()
 
-        @classmethod
-        def write_to_file(cls, _str, _file):
-            f = open(_file, 'w')
-            f.write(_str)
-            f.flush()
-            f.close()
+    @classmethod
+    def write_to_file(cls, _str, _file):
+        f = open(_file, 'w')
+        f.write(_str)
+        f.flush()
+        f.close()
 
 
 if __name__ == '__main__':

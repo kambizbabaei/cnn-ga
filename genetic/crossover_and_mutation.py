@@ -265,26 +265,30 @@ class Mutation(object):
         self.log.info('A %s unit is added (u_=%.2f)' % ('CONV' if type_ == 1 else 'POOLING', u_))
 
         if type_ == 2:
+            # If a pooling unit is added, make sure it does not exceed pool limits
             num_exist_pool_units = sum([1 for u in indi.units if u.type == 2])
             if num_exist_pool_units > StatusUpdateTool.get_pool_limit()[1] - 1:
                 type_ = 1
-                self.log.info('Change to CONV because #pool > pool_limit')
+                self.log.info('Changed to CONV because #pool > pool_limit')
 
+        # Add a pooling unit
         if type_ == 2:
             add_unit = indi.init_a_pool(mutation_position + 1, _max_or_avg=None)
         else:
-            # find the first conv going backward for in_channel
+            # If a conv unit is added, we need to determine the input channel
             _in_channel = 0
-            for i in range(mutation_position, -1, -1):
-                if indi.units[i].type == 1:
-                    _in_channel = indi.units[i].out_channel
-                    break
-            add_unit = indi.init_a_conv(mutation_position + 1, _in_channel=_in_channel, _out_channel=None)
-            # adjust input channel of next conv
-            for i in range(mutation_position + 1, len(indi.units)):
-                if indi.units[i].type == 1:
-                    indi.units[i].in_channel = add_unit.out_channel
-                    break
+            if mutation_position == 0:
+                # For the first layer, input channel is fixed to the image channel
+                _in_channel = indi.image_channel
+            else:
+                # For subsequent layers, we take the output channel of the previous layer
+                for i in range(mutation_position - 1, -1, -1):
+                    if indi.units[i].type == 1:
+                        _in_channel = indi.units[i].out_channel
+                        break
+            
+            # Add a grouped pointwise or basic convolution based on mutation
+            add_unit = indi.init_a_conv(mutation_position + 1, _in_channel=_in_channel, _out_channel=None, is_first_layar=False)
 
         new_unit_list = []
         for i in range(mutation_position + 1):
@@ -298,6 +302,7 @@ class Mutation(object):
         indi.number_id += 1
         indi.units = new_unit_list
         indi.reset_acc()
+
 
     def do_remove_unit_mutation(self, indi):
         self.log.info('Do the REMOVE mutation for indi:%s' % (indi.id))
@@ -326,12 +331,12 @@ class Mutation(object):
             indi.reset_acc()
         else:
             self.log.warn('REMOVE mutation not possible, only one unit remains.')
-
     def do_modify_conv_mutation(self, indi):
         self.log.info('Do the CHANNEL mutation for indi:%s' % (indi.id))
-        conv_index_list = [i for i, u in enumerate(indi.units) if u.type == 1]
+        conv_index_list = [i for i, u in enumerate(indi.units) if u.type == 1 or u.type == 3]  # Include GroupedPointwiseBlock
+
         if not conv_index_list:
-            self.log.warn('No CONV unit exist, skip conv mutation.')
+            self.log.warn('No CONV or GroupedPointwiseBlock unit exist, skip conv mutation.')
             return
 
         selected_index = int(np.floor(np.random.random() * len(conv_index_list)))
@@ -341,70 +346,56 @@ class Mutation(object):
         # random selection of new channels from output_channel
         channel_list = StatusUpdateTool.get_output_channel()
 
-        # ADDED: possible sub-mutation to change 'groups'
-        # We'll do it with a small probability (e.g. 40%)
-        change_groups_chance = 0.4
-
-        # Step 1: Possibly change groups
-        if random.random() < change_groups_chance:
+        # Check if we are modifying a GroupedPointwiseBlock
+        if indi.units[conv_idx].type == 3:  # If it's a GroupedPointwiseBlock
+            self.log.info(f'Changing groups for GroupedPointwiseBlock at index {conv_idx}')
+            # Mutate the groups for GroupedPointwiseBlock
             old_groups = indi.units[conv_idx].groups
             in_ch = indi.units[conv_idx].in_channel
             out_ch = indi.units[conv_idx].out_channel  # Ensure out_channel is considered
-            # pick new groups from indi.groups_count that divides both in_ch and out_ch
+            
             possible_groups = [g for g in indi.groups_count if (in_ch % g == 0 and out_ch % g == 0)]
             if possible_groups:
                 new_groups = np.random.choice(possible_groups)
                 if new_groups != old_groups:
                     indi.units[conv_idx].groups = new_groups
-                    self.log.info('Changed groups from %d to %d at unit idx=%d' 
-                                  % (old_groups, new_groups, conv_idx))
+                    self.log.info('Changed groups from %d to %d at unit idx=%d' % (old_groups, new_groups, conv_idx))
                     indi.reset_acc()
 
-        # Step 2: Possibly change in_channel/out_channel
-        # (Your original code for changing input/out channels)
+        # Now modify in_channel and out_channel for all convolution layers (Basic + GroupedPointwiseBlock)
         old_in = indi.units[conv_idx].in_channel
         new_in = random.choice(channel_list)
 
         if new_in != old_in:
-            # but we won't forcibly override if conv_idx=0. Usually that must match the image channel, 
-            # or handle carefully. Let's be consistent with your original code logic:
             if conv_idx > 0:
-                self.log.info('Conv idx=%d changes in_channel from %d to %d' 
-                              % (conv_idx, old_in, new_in))
+                self.log.info(f'Conv idx={conv_idx} changes in_channel from {old_in} to {new_in}')
                 indi.units[conv_idx].in_channel = new_in
 
-                # The previous conv out_channel also changes
                 prev_conv_idx = -1
                 for pidx in range(conv_idx - 1, -1, -1):
-                    if indi.units[pidx].type == 1:
+                    if indi.units[pidx].type == 1 or indi.units[pidx].type == 3:
                         prev_conv_idx = pidx
                         break
                 if prev_conv_idx >= 0:
                     old_out = indi.units[prev_conv_idx].out_channel
                     indi.units[prev_conv_idx].out_channel = new_in
-                    self.log.info('Also changed out_channel of unit idx=%d from %d to %d' 
-                                  % (prev_conv_idx, old_out, new_in))
+                    self.log.info(f'Also changed out_channel of unit idx={prev_conv_idx} from {old_out} to {new_in}')
                 indi.reset_acc()
-            else:
-                self.log.warn('Mutation tries to change in_channel of the first conv, ignoring.')
 
         old_out = indi.units[conv_idx].out_channel
         new_out = random.choice(channel_list)
         if new_out != old_out:
-            self.log.info('Conv idx=%d changes out_channel from %d to %d'
-                          % (conv_idx, old_out, new_out))
+            self.log.info(f'Conv idx={conv_idx} changes out_channel from {old_out} to {new_out}')
             indi.units[conv_idx].out_channel = new_out
-            # next conv in_channel might need to be changed
             next_conv_idx = -1
             for nxt in range(conv_idx + 1, len(indi.units)):
-                if indi.units[nxt].type == 1:
+                if indi.units[nxt].type == 1 or indi.units[nxt].type == 3:
                     next_conv_idx = nxt
                     break
             if next_conv_idx >= 0:
                 old_next_in = indi.units[next_conv_idx].in_channel
                 indi.units[next_conv_idx].in_channel = new_out
-                self.log.info('Due to above, changed in_channel of unit idx=%d from %d to %d'
-                              % (next_conv_idx, old_next_in, new_out))
+                self.log.info(f'Due to above, changed in_channel of unit idx={next_conv_idx} from {old_next_in} to {new_out}')
             indi.reset_acc()
 
     def do_modify_pooling_type_mutation(self, indi):

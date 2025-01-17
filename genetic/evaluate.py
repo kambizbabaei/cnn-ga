@@ -46,10 +46,10 @@ class FitnessEvaluate(object):
 
                 # Instead, your code spawns a separate process & waits for an available GPU:
                 has_evaluated_offspring = True
-                time.sleep(60)
+                time.sleep(30)
                 gpu_id = GPUTools.detect_available_gpu_id()
                 while gpu_id is None:
-                    time.sleep(300)
+                    time.sleep(150)
                     gpu_id = GPUTools.detect_available_gpu_id()
                 if gpu_id is not None:
                     file_name = indi.id

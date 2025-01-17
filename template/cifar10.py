@@ -11,6 +11,8 @@ import os
 from datetime import datetime
 import multiprocessing
 from utils import StatusUpdateTool
+from prettytable import PrettyTable
+
 
 class BasicBlock(nn.Module):
     expansion = 1
@@ -233,6 +235,19 @@ class TrainModel(object):
             self.test(p)
         return self.best_acc
 
+    def count_parameters(self):
+        model = self.net
+        table = PrettyTable(["Modules", "Parameters"])
+        total_params = 0
+        for name, parameter in model.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            params = parameter.numel()
+            table.add_row([name, params])
+            total_params += params
+        print(table)
+        print(f"Total Trainable Params: {total_params}")
+        return total_params , table
 
 class RunModel(object):
     def do_work(self, gpu_id, file_id):
@@ -248,6 +263,8 @@ class RunModel(object):
             m.log_record(f'Exception occur:{str(e)}')
         finally:
             m.log_record(f'Finished-Acc:{best_acc:.3f}')
+            m.log_record(m.count_parameters()[0])
+            m.log_record(m.count_parameters()[1])
             populations_dir = './populations'
             os.makedirs(populations_dir, exist_ok=True)
             with open(f'{populations_dir}/after_{file_id[4:6]}.txt', 'a+') as f:

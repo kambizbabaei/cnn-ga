@@ -241,7 +241,6 @@ class GPUTools(object):
             Log.info('GPU_QUERY- GPUs [%s] are occupying' % (','.join(used_gpu_ids)))
             return False
 
-
 class Utils(object):
     _lock = multiprocessing.Lock()
 

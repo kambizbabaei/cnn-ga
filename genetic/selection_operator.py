@@ -7,7 +7,7 @@ class Selection(object):
         idx = np.argsort(a)
         idx = idx[::-1]
         sort_a = a[idx]
-        sum_a = np.sum(a).astype(np.float)
+        sum_a = np.sum(a).astype(np.float64)
         selected_index = []
         for i in range(k):
             u = np.random.rand()*sum_a

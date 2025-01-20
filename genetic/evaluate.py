@@ -60,7 +60,7 @@ class FitnessEvaluate(object):
                         _module = importlib.import_module('.', module_name)
                     _class = getattr(_module, 'RunModel')
                     cls_obj = _class()
-                    p=Process(target=cls_obj.do_work, args=('%d'%(gpu_id), file_name,))
+                    p=Process(target=cls_obj.do_work, args=('%s'%(gpu_id), file_name,))
                     p.start()
             else:
                 file_name = indi.id

@@ -11,7 +11,10 @@ import os
 from datetime import datetime
 import multiprocessing
 from utils import StatusUpdateTool
-torch.device("cuda")
+from prettytable import PrettyTable
+
+
+
 class BasicBlock(nn.Module):
     expansion = 1
     def __init__(self, in_planes, planes, stride=1):
@@ -132,6 +135,18 @@ class TrainModel(object):
             self.test(total_epoch)
         return self.best_acc
 
+    def count_parameters(self):
+        model = self.net
+        table = PrettyTable(["Modules", "Parameters"])
+        total_params = 0
+        for name, parameter in model.named_parameters():
+            if not parameter.requires_grad:
+                continue
+            params = parameter.numel()
+            table.add_row([name, params])
+            total_params += params
+        print(f"Total Trainable Params: {total_params}")
+        return total_params , table
 
 class RunModel(object):
     def do_work(self, gpu_id, file_id):
@@ -148,7 +163,8 @@ class RunModel(object):
             m.log_record('Exception occur:%s'%(str(e)))
         finally:
             m.log_record('Finished-Acc:%.3f'%best_acc)
-
+            m.log_record(m.count_parameters()[0])
+            m.log_record(m.count_parameters()[1])
             f = open('./populations/after_%s.txt'%(file_id[4:6]), 'a+')
             f.write('%s=%.5f\n'%(file_id, best_acc))
             f.flush()

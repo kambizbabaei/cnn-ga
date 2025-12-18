@@ -40,6 +40,7 @@ class Individual(object):
         self.image_channel = params['image_channel']
         self.output_channles = params['output_channel']
         self.units = []
+        self.estimated_memory_mb = None  # Estimated GPU memory for training
 
     def reset_acc(self):
         self.acc = -1.0

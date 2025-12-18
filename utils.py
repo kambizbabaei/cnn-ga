@@ -7,6 +7,7 @@ import logging
 import sys
 import multiprocessing
 import time
+# Note: nvidia-ml-py package still uses 'pynvml' as the module name
 from pynvml import (
     nvmlInit,
     nvmlShutdown,
@@ -14,6 +15,7 @@ from pynvml import (
     nvmlDeviceGetHandleByIndex,
     nvmlDeviceGetName,
     nvmlDeviceGetComputeRunningProcesses,
+    nvmlDeviceGetMemoryInfo,
     nvmlSystemGetProcessName,
     NVMLError,
 )
@@ -145,6 +147,137 @@ class StatusUpdateTool(object):
         assert len(rs) == 4
         mutation_prob_list = [float(i) for i in rs]
         return mutation_prob_list
+
+    @classmethod
+    def get_models_per_gpu(cls):
+        try:
+            rs = cls.__read_ini_file('gpu_scheduling', 'models_per_gpu')
+            return int(rs)
+        except:
+            return 1  # Default value
+
+    @classmethod
+    def get_poll_interval(cls):
+        try:
+            rs = cls.__read_ini_file('gpu_scheduling', 'poll_interval')
+            return int(rs)
+        except:
+            return 5  # Default value
+
+    @classmethod
+    def get_min_free_memory_mb(cls):
+        try:
+            rs = cls.__read_ini_file('gpu_scheduling', 'min_free_memory_mb')
+            return int(rs)
+        except:
+            return 2048  # Default value (2GB)
+
+    @classmethod
+    def get_memory_safety_margin_mb(cls):
+        try:
+            rs = cls.__read_ini_file('gpu_scheduling', 'memory_safety_margin_mb')
+            return int(rs)
+        except:
+            return 512  # Default value (512MB)
+
+
+def estimate_model_memory(model, batch_size=128, input_size=(3, 32, 32)):
+    """
+    Estimate GPU memory required for training a model.
+    Measures actual CUDA memory usage during multiple forward+backward passes.
+    Uses SGD optimizer matching actual training configuration.
+    
+    Args:
+        model: PyTorch nn.Module (on CPU)
+        batch_size: Training batch size
+        input_size: Input tensor size (C, H, W)
+        
+    Returns:
+        Estimated memory in MB
+    """
+    import torch
+    
+    # Check if CUDA is available
+    if not torch.cuda.is_available():
+        # Fallback to CPU estimation if CUDA not available
+        param_bytes = sum(p.numel() * 4 for p in model.parameters())
+        # Rough estimate: 4x parameters for training (params + grads + optimizer + activations)
+        total_bytes = param_bytes * 4
+        return total_bytes / (1024 * 1024)
+    
+    device = torch.device('cuda:0')
+    
+    try:
+        # Clear CUDA cache
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        
+        # Enable cudnn.benchmark to match actual training setup
+        # This affects cuDNN workspace memory allocation
+        import torch.backends.cudnn as cudnn
+        cudnn.benchmark = True
+        
+        # Move model to GPU (create a copy to avoid modifying original)
+        model_gpu = model.to(device)
+        
+        # Create dummy input on GPU
+        dummy_input = torch.randn(batch_size, *input_size, device=device)
+        dummy_target = torch.randint(0, 10, (batch_size,), device=device)
+        
+        # Use SGD optimizer matching actual training configuration
+        # Training uses: momentum=0.9, weight_decay=5e-4
+        optimizer = torch.optim.SGD(
+            model_gpu.parameters(),
+            lr=0.1,  # Initial learning rate from training
+            momentum=0.9,
+            weight_decay=5e-4
+        )
+        criterion = torch.nn.CrossEntropyLoss()
+        
+        # Run multiple iterations (5 passes) to capture peak memory across training
+        num_iterations = 5
+        peak_memory_bytes = 0
+        
+        for iteration in range(num_iterations):
+            # Zero gradients
+            optimizer.zero_grad()
+            
+            # Run forward pass
+            output = model_gpu(dummy_input)
+            loss = criterion(output, dummy_target)
+            
+            # Run backward pass (this allocates gradients and stores activations)
+            loss.backward()
+            optimizer.step()
+            
+            # Check peak memory after each iteration
+            current_peak = torch.cuda.max_memory_allocated(device)
+            if current_peak > peak_memory_bytes:
+                peak_memory_bytes = current_peak
+        
+        # Clean up
+        del model_gpu, dummy_input, dummy_target, output, loss, optimizer, criterion
+        torch.cuda.empty_cache()
+        
+        # Convert to MB
+        memory_mb = peak_memory_bytes / (1024 * 1024)
+        
+        # Apply correction factor to account for:
+        # - cuDNN workspace memory (not tracked by max_memory_allocated)
+        # - Memory fragmentation over multiple epochs
+        # - Memory allocated outside PyTorch's allocator
+        # Based on testing: torch.cuda.max_memory_allocated shows ~807MB but actual usage is ~1420MB
+        # Ratio: 1420/807 ≈ 1.76x, using 1.8x for safety margin
+        memory_mb = memory_mb * 1.8
+        
+        return memory_mb
+        
+    except Exception as e:
+        # Fallback: use parameter-based heuristic if GPU measurement fails
+        param_bytes = sum(p.numel() * 4 for p in model.parameters())
+        # Conservative estimate: 4-5x parameters for training
+        total_bytes = param_bytes * 4.5
+        return total_bytes / (1024 * 1024)
 
 
 class Log(object):
@@ -311,6 +444,150 @@ class GPUTools(object):
             occupied_gpus = sorted(used_gpu_ids)
             Log.info(f'GPU_QUERY- GPUs [{",".join(occupied_gpus)}] are occupying')
             return False
+
+    @classmethod
+    def get_gpu_memory_info(cls, gpu_id):
+        """
+        Get memory information for a specific GPU.
+
+        Args:
+            gpu_id: GPU ID as string (e.g., "0", "1")
+
+        Returns:
+            tuple: (total_mb, used_mb, free_mb) or None if error
+        """
+        try:
+            nvmlInit()
+            handle = nvmlDeviceGetHandleByIndex(int(gpu_id))
+            meminfo = nvmlDeviceGetMemoryInfo(handle)
+            
+            total_mb = meminfo.total / (1024 * 1024)  # Convert bytes to MB
+            used_mb = meminfo.used / (1024 * 1024)
+            free_mb = meminfo.free / (1024 * 1024)
+            
+            # Don't shutdown here - let caller manage NVML lifecycle
+            # nvmlShutdown() is called in _get_equipped_gpu_ids_and_used_gpu_ids
+            
+            return (total_mb, used_mb, free_mb)
+        except Exception as e:
+            Log.error(f"Error getting memory info for GPU {gpu_id}: {e}")
+            import traceback
+            Log.error(traceback.format_exc())
+            return None
+
+    @classmethod
+    def has_sufficient_memory(cls, gpu_id, required_mb):
+        """
+        Check if a GPU has sufficient free memory.
+
+        Args:
+            gpu_id: GPU ID as string
+            required_mb: Required memory in MB
+
+        Returns:
+            bool: True if GPU has sufficient memory, False otherwise
+        """
+        meminfo = cls.get_gpu_memory_info(gpu_id)
+        if meminfo is None:
+            return False
+        total_mb, used_mb, free_mb = meminfo
+        return free_mb >= required_mb
+
+    @classmethod
+    def get_gpu_process_count(cls, gpu_id):
+        """
+        Get the number of processes running on a specific GPU.
+
+        Args:
+            gpu_id: GPU ID as string
+
+        Returns:
+            int: Number of processes, or 0 if error
+        """
+        try:
+            nvmlInit()
+            handle = nvmlDeviceGetHandleByIndex(int(gpu_id))
+            processes = nvmlDeviceGetComputeRunningProcesses(handle)
+            # Don't shutdown here - let caller manage NVML lifecycle
+            return len(processes)
+        except Exception as e:
+            Log.error(f"Error getting process count for GPU {gpu_id}: {e}")
+            return 0
+
+    @classmethod
+    def get_available_gpu_with_memory(cls, required_mb, models_per_gpu, tracked_process_count=None):
+        """
+        Find a GPU that has both an available slot and sufficient memory.
+
+        Args:
+            required_mb: Required memory in MB
+            models_per_gpu: Maximum number of models per GPU
+            tracked_process_count: Optional dict {gpu_id: count} of processes we're tracking ourselves
+
+        Returns:
+            tuple: (gpu_id, free_memory_mb) or (None, None) if no GPU available
+        """
+        try:
+            nvmlInit()
+            equipped_gpu_ids, _ = cls._get_equipped_gpu_ids_and_used_gpu_ids()
+            
+            if not equipped_gpu_ids:
+                Log.info(f'No equipped GPUs found. Required memory: {required_mb} MB')
+                nvmlShutdown()
+                return (None, None)
+            
+            for gpu_id in equipped_gpu_ids:
+                try:
+                    handle = nvmlDeviceGetHandleByIndex(int(gpu_id))
+                    
+                    # Check if GPU has available slot - use our own tracking if provided
+                    if tracked_process_count is not None and gpu_id in tracked_process_count:
+                        our_process_count = tracked_process_count[gpu_id]
+                        Log.info(f'GPU {gpu_id}: {our_process_count} tracked processes (max: {models_per_gpu})')
+                        if our_process_count >= models_per_gpu:
+                            Log.info(f'GPU {gpu_id}: No available slot (tracked={our_process_count} >= {models_per_gpu})')
+                            continue
+                    else:
+                        # Fallback to NVML count if no tracking provided
+                        processes = nvmlDeviceGetComputeRunningProcesses(handle)
+                        process_count = len(processes)
+                        Log.info(f'GPU {gpu_id}: {process_count} total processes on GPU (max: {models_per_gpu})')
+                        if process_count >= models_per_gpu:
+                            Log.info(f'GPU {gpu_id}: No available slot (process_count={process_count} >= {models_per_gpu})')
+                            continue
+                    
+                    # Check memory
+                    meminfo = nvmlDeviceGetMemoryInfo(handle)
+                    total_mb = meminfo.total / (1024 * 1024)
+                    used_mb = meminfo.used / (1024 * 1024)
+                    free_mb = meminfo.free / (1024 * 1024)
+                    
+                    Log.info(f'GPU {gpu_id}: Memory - Total: {total_mb:.0f} MB, Used: {used_mb:.0f} MB, Free: {free_mb:.0f} MB, Required: {required_mb} MB')
+                    
+                    if free_mb >= required_mb:
+                        Log.info(f'GPU {gpu_id} available: {free_mb:.0f} MB free (required: {required_mb} MB)')
+                        nvmlShutdown()
+                        return (gpu_id, free_mb)
+                    else:
+                        Log.warn(f'GPU {gpu_id}: Insufficient memory ({free_mb:.0f} MB < {required_mb} MB)')
+                        
+                except Exception as e:
+                    Log.error(f'Error checking GPU {gpu_id}: {e}')
+                    continue
+            
+            Log.warn(f'No GPU available with sufficient memory. Required: {required_mb} MB')
+            nvmlShutdown()
+            return (None, None)
+        except Exception as e:
+            Log.error(f'Error in get_available_gpu_with_memory: {e}')
+            import traceback
+            Log.error(traceback.format_exc())
+            try:
+                nvmlShutdown()
+            except:
+                pass
+            return (None, None)
+
 class Utils(object):
     _lock = multiprocessing.Lock()
 

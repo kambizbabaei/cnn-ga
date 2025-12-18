@@ -12,8 +12,6 @@ from datetime import datetime
 import multiprocessing
 from utils import StatusUpdateTool
 
-torch.device("cuda")  # Force device to cuda if available
-
 
 class BasicBlock(nn.Module):
     expansion = 1

@@ -1,4 +1,4 @@
 numpy
-pynvml
+nvidia-ml-py
 torch
 torchvision
